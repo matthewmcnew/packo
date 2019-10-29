@@ -58,11 +58,12 @@ func main() {
 		log.Fatalf("could not setup env: %s", err.Error())
 	}
 
-	fmt.Printf("Uploading %s ... \n", *path)
+	log.Printf("Uploading %s ... \n", *path)
 	image, err := upload.Upload(*path, *registry)
 	if err != nil {
 		log.Fatalf("could not upload: %s", err)
 	}
+	log.Printf("Upload Complete to %s. \n", image)
 
 	err = wait.RunGroup(
 		Build(client, k8sClient, "controller", *registry, image),
