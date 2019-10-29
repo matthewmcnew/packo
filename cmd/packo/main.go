@@ -79,7 +79,7 @@ func main() {
 var parse = resource.MustParse("2Gi")
 
 func Build(client versioned.Interface, k8sClient k8sclient.Interface, name, registry, sourceImage string) wait.DoneFunc {
-	err := createOrUpdateImage(client, &v1alpha1.Image{
+	image, err := createOrUpdateImage(client, &v1alpha1.Image{
 		ObjectMeta: v1.ObjectMeta{
 			Name: name,
 		},
@@ -111,7 +111,9 @@ func Build(client versioned.Interface, k8sClient k8sclient.Interface, name, regi
 		return done(err)
 	}
 
-	return streamLogsUntilFinished(client, k8sClient, name, name)
+	nextBuild := fmt.Sprintf("%d", image.Status.BuildCounter+1) //simplistic
+
+	return streamLogsUntilFinished(client, k8sClient, name, name, nextBuild)
 }
 
 func done(err error) wait.DoneFunc {
@@ -144,7 +146,7 @@ func (i ImageListener) checkIfDone(obj interface{}) {
 	}
 }
 
-func streamLogsUntilFinished(client versioned.Interface, k8sClient k8sclient.Interface, name, prefix string) wait.DoneFunc {
+func streamLogsUntilFinished(client versioned.Interface, k8sClient k8sclient.Interface, name, prefix, buildNumber string) wait.DoneFunc {
 	return func(context context.Context) error {
 		informerFactory := externalversions.NewSharedInformerFactoryWithOptions(client, 10*time.Hour,
 			externalversions.WithTweakListOptions(func(options *v1.ListOptions) {
@@ -162,10 +164,9 @@ func streamLogsUntilFinished(client versioned.Interface, k8sClient k8sclient.Int
 		informerFactory.Start(context.Done())
 
 		go func() {
-			err := logs.NewBuildLogsClient(k8sClient).Tail(context, logging.NewPrefixWriter(os.Stdout, prefix), name, "", v1.NamespaceDefault)
+			err := logs.NewBuildLogsClient(k8sClient).Tail(context, logging.NewPrefixWriter(os.Stdout, prefix), name, buildNumber, v1.NamespaceDefault)
 			if err != nil {
 				fmt.Printf("error streaming logs for image %s: %s", name, err)
-				//print this out
 			}
 		}()
 
@@ -173,25 +174,25 @@ func streamLogsUntilFinished(client versioned.Interface, k8sClient k8sclient.Int
 	}
 }
 
-func createOrUpdateImage(client versioned.Interface, image *v1alpha1.Image) error {
+func createOrUpdateImage(client versioned.Interface, image *v1alpha1.Image) (*v1alpha1.Image, error) {
 	existingImage, err := client.BuildV1alpha1().Images(v1.NamespaceDefault).Get(image.Name, v1.GetOptions{})
 	if err != nil && !errors.IsNotFound(err) {
-		return err
+		return nil, err
 	}
 
 	if errors.IsNotFound(err) {
-		_, err := client.BuildV1alpha1().Images(v1.NamespaceDefault).Create(image)
+		image, err = client.BuildV1alpha1().Images(v1.NamespaceDefault).Create(image)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	} else {
-		_, err := client.BuildV1alpha1().Images(v1.NamespaceDefault).Update(&v1alpha1.Image{
+		image, err = client.BuildV1alpha1().Images(v1.NamespaceDefault).Update(&v1alpha1.Image{
 			ObjectMeta: existingImage.ObjectMeta,
 			Spec:       image.Spec,
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return image, nil
 }
