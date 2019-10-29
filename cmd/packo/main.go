@@ -65,12 +65,19 @@ func main() {
 	}
 	log.Printf("Upload Complete to %s. \n", image)
 
+	kbuilder := &kpackBuilder{
+		client:      client,
+		k8sClient:   k8sClient,
+		registry:    *registry,
+		sourceImage: image,
+	}
+
 	err = wait.RunGroup(
-		Build(client, k8sClient, "controller", *registry, image),
-		Build(client, k8sClient, "build-init", *registry, image),
-		Build(client, k8sClient, "rebase", *registry, image),
-		Build(client, k8sClient, "webhook", *registry, image),
-		Build(client, k8sClient, "completion", *registry, image),
+		kbuilder.Build("controller"),
+		kbuilder.Build("build-init"),
+		kbuilder.Build("rebase"),
+		kbuilder.Build("webhook"),
+		kbuilder.Build("completion"),
 	)
 	if err != nil {
 		log.Fatalf(err.Error())
@@ -79,13 +86,20 @@ func main() {
 
 var parse = resource.MustParse("2Gi")
 
-func Build(client versioned.Interface, k8sClient k8sclient.Interface, name, registry, sourceImage string) wait.DoneFunc {
-	image, err := createOrUpdateImage(client, &v1alpha1.Image{
+type kpackBuilder struct {
+	client      versioned.Interface
+	k8sClient   k8sclient.Interface
+	registry    string
+	sourceImage string
+}
+
+func (k kpackBuilder) Build(name string) wait.DoneFunc {
+	image, err := createOrUpdateImage(k.client, &v1alpha1.Image{
 		ObjectMeta: v1.ObjectMeta{
 			Name: name,
 		},
 		Spec: v1alpha1.ImageSpec{
-			Tag: registry + "/" + name,
+			Tag: k.registry + "/" + name,
 			Builder: v1alpha1.ImageBuilder{
 				TypeMeta: v1.TypeMeta{
 					Kind: "ClusterBuilder",
@@ -94,7 +108,7 @@ func Build(client versioned.Interface, k8sClient k8sclient.Interface, name, regi
 			},
 			Source: v1alpha1.SourceConfig{
 				Registry: &v1alpha1.Registry{
-					Image: sourceImage,
+					Image: k.sourceImage,
 				},
 			},
 			CacheSize: &parse,
@@ -114,7 +128,7 @@ func Build(client versioned.Interface, k8sClient k8sclient.Interface, name, regi
 
 	nextBuild := fmt.Sprintf("%d", image.Status.BuildCounter+1) //simplistic
 
-	return streamLogsUntilFinished(client, k8sClient, name, name, nextBuild)
+	return streamLogsUntilFinished(k.client, k.k8sClient, name, name, nextBuild)
 }
 
 func done(err error) wait.DoneFunc {
