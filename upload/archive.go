@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/pkg/ioutils"
@@ -161,6 +162,10 @@ func ReadTarEntry(rc io.Reader, entryPath string) (*tar.Header, []byte, error) {
 
 func WriteDirToTar(tw *tar.Writer, srcDir, basePath string, uid, gid int, mode int64) error {
 	return filepath.Walk(srcDir, func(file string, fi os.FileInfo, err error) error {
+		if strings.Contains(file, ".git") {
+			return nil
+		}
+
 		if err != nil {
 			return err
 		}
