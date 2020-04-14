@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/buildpack/pack/logging"
+	"github.com/buildpacks/pack/logging"
 	"github.com/matthewmcnew/packo/k8s"
 	"github.com/matthewmcnew/packo/setup"
 	"github.com/matthewmcnew/packo/upload"
@@ -20,7 +20,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	k8sclient "k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
-	duckv1alpha1 "knative.dev/pkg/apis/duck/v1alpha1"
 	"log"
 	"os"
 	"time"
@@ -38,7 +37,7 @@ func main() {
 		log.Fatal("No registry provided. Please provide a registry with --registry")
 	}
 
-	clusterConfig, err := k8s.BuildConfigFromFlags("", "")
+	clusterConfig, namespace, err := k8s.BuildConfigFromFlags("", "")
 	if err != nil {
 		log.Fatalf("Error building kubeconfig: %v", err)
 	}
@@ -53,7 +52,7 @@ func main() {
 		log.Fatalf("could not get kubernetes client: %s", err.Error())
 	}
 
-	err = setup.SetupEnv(client, k8sClient, *registry)
+	err = setup.SetupEnv(client, k8sClient, *registry, namespace)
 	if err != nil {
 		log.Fatalf("could not setup env: %s", err.Error())
 	}
@@ -70,6 +69,7 @@ func main() {
 		k8sClient:   k8sClient,
 		registry:    *registry,
 		sourceImage: image,
+		namespace:   namespace,
 	}
 
 	err = wait.RunGroup(
@@ -91,20 +91,27 @@ type kpackBuilder struct {
 	k8sClient   k8sclient.Interface
 	registry    string
 	sourceImage string
+	namespace   string
 }
 
 func (k kpackBuilder) Build(name string) wait.DoneFunc {
+	kind := "CustomClusterBuilder"
+
+	_, err := k.client.ExperimentalV1alpha1().CustomClusterBuilders().Get("default", v1.GetOptions{})
+	if errors.IsNotFound(err) {
+		kind = "ClusterBuilder"
+	}
+
 	image, err := createOrUpdateImage(k.client, &v1alpha1.Image{
 		ObjectMeta: v1.ObjectMeta{
-			Name: name,
+			Name:      name,
+			Namespace: k.namespace,
 		},
 		Spec: v1alpha1.ImageSpec{
 			Tag: k.registry + "/" + name,
-			Builder: v1alpha1.ImageBuilder{
-				TypeMeta: v1.TypeMeta{
-					Kind: "ClusterBuilder",
-				},
-				Name: "default-builder",
+			Builder: corev1.ObjectReference{
+				Kind: kind,
+				Name: "default",
 			},
 			Source: v1alpha1.SourceConfig{
 				Registry: &v1alpha1.Registry{
@@ -112,7 +119,7 @@ func (k kpackBuilder) Build(name string) wait.DoneFunc {
 				},
 			},
 			CacheSize: &parse,
-			Build: v1alpha1.ImageBuild{
+			Build: &v1alpha1.ImageBuild{
 				Env: []corev1.EnvVar{
 					{
 						Name:  "BP_GO_TARGETS",
@@ -128,7 +135,7 @@ func (k kpackBuilder) Build(name string) wait.DoneFunc {
 
 	nextBuild := fmt.Sprintf("%d", image.Status.BuildCounter+1) //simplistic
 
-	return streamLogsUntilFinished(k.client, k.k8sClient, name, name, nextBuild)
+	return streamLogsUntilFinished(k.client, k.k8sClient, k.namespace, name, name, nextBuild)
 }
 
 func done(err error) wait.DoneFunc {
@@ -156,18 +163,18 @@ func (i ImageListener) OnDelete(obj interface{}) {
 func (i ImageListener) checkIfDone(obj interface{}) {
 	image := obj.(*v1alpha1.Image)
 
-	if image.Status.GetCondition(duckv1alpha1.ConditionReady).IsTrue() {
+	if image.Status.GetCondition("Ready").IsTrue() {
 		i.doneChan <- nil
 	}
 }
 
-func streamLogsUntilFinished(client versioned.Interface, k8sClient k8sclient.Interface, name, prefix, buildNumber string) wait.DoneFunc {
+func streamLogsUntilFinished(client versioned.Interface, k8sClient k8sclient.Interface, namespace, name, prefix, buildNumber string) wait.DoneFunc {
 	return func(context context.Context) error {
 		informerFactory := externalversions.NewSharedInformerFactoryWithOptions(client, 10*time.Hour,
 			externalversions.WithTweakListOptions(func(options *v1.ListOptions) {
 				options.FieldSelector = fmt.Sprintf("metadata.name=%s", name)
 			}),
-			externalversions.WithNamespace(v1.NamespaceDefault),
+			externalversions.WithNamespace(namespace),
 		)
 
 		doneChan := make(chan error)
@@ -179,7 +186,7 @@ func streamLogsUntilFinished(client versioned.Interface, k8sClient k8sclient.Int
 		informerFactory.Start(context.Done())
 
 		go func() {
-			err := logs.NewBuildLogsClient(k8sClient).Tail(context, logging.NewPrefixWriter(os.Stdout, prefix), name, buildNumber, v1.NamespaceDefault)
+			err := logs.NewBuildLogsClient(k8sClient).Tail(context, logging.NewPrefixWriter(os.Stdout, prefix), name, buildNumber, namespace)
 			if err != nil {
 				fmt.Printf("error streaming logs for image %s: %s", name, err)
 			}
@@ -190,18 +197,18 @@ func streamLogsUntilFinished(client versioned.Interface, k8sClient k8sclient.Int
 }
 
 func createOrUpdateImage(client versioned.Interface, image *v1alpha1.Image) (*v1alpha1.Image, error) {
-	existingImage, err := client.BuildV1alpha1().Images(v1.NamespaceDefault).Get(image.Name, v1.GetOptions{})
+	existingImage, err := client.BuildV1alpha1().Images(image.Namespace).Get(image.Name, v1.GetOptions{})
 	if err != nil && !errors.IsNotFound(err) {
 		return nil, err
 	}
 
 	if errors.IsNotFound(err) {
-		image, err = client.BuildV1alpha1().Images(v1.NamespaceDefault).Create(image)
+		image, err = client.BuildV1alpha1().Images(image.Namespace).Create(image)
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		image, err = client.BuildV1alpha1().Images(v1.NamespaceDefault).Update(&v1alpha1.Image{
+		image, err = client.BuildV1alpha1().Images(image.Namespace).Update(&v1alpha1.Image{
 			ObjectMeta: existingImage.ObjectMeta,
 			Spec:       image.Spec,
 		})

@@ -6,7 +6,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd/api"
 )
 
-func BuildConfigFromFlags(masterURL, kubeconfigPath string) (*rest.Config, error) {
+func BuildConfigFromFlags(masterURL, kubeconfigPath string) (*rest.Config, string, error) {
 
 	var clientConfigLoader clientcmd.ClientConfigLoader
 
@@ -16,7 +16,12 @@ func BuildConfigFromFlags(masterURL, kubeconfigPath string) (*rest.Config, error
 		clientConfigLoader = &clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath}
 	}
 
-	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+	config := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		clientConfigLoader,
-		&clientcmd.ConfigOverrides{ClusterInfo: api.Cluster{Server: masterURL}}).ClientConfig()
+		&clientcmd.ConfigOverrides{ClusterInfo: api.Cluster{Server: masterURL}})
+
+	namespace, _, _ := config.Namespace()
+
+	clientConfig, err := config.ClientConfig()
+	return clientConfig, namespace, err
 }
